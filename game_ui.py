@@ -23,16 +23,23 @@ class MazeGame:
         self.padding = 20
         self.lang = "zh"
         self.current_status_key: Tuple[str, Dict[str, Any]] = ("status_start", {})
-        if (self.width, self.height) not in DIFFICULTY_SETTINGS.values():
-            self.width, self.height = DIFFICULTY_SETTINGS[DEFAULT_DIFFICULTY]
+        requested_size = (self.width, self.height)
         initial_difficulty = next(
             (
                 name
-                for name, dims in DIFFICULTY_SETTINGS.items()
-                if dims == (self.width, self.height)
+                for name, cfg in DIFFICULTY_SETTINGS.items()
+                if cfg["size"] == requested_size
             ),
-            DEFAULT_DIFFICULTY,
+            None,
         )
+        if initial_difficulty is None:
+            default_cfg = DIFFICULTY_SETTINGS[DEFAULT_DIFFICULTY]
+            self.width, self.height = default_cfg["size"]
+            initial_difficulty = DEFAULT_DIFFICULTY
+            initial_config = default_cfg
+        else:
+            initial_config = DIFFICULTY_SETTINGS[initial_difficulty]
+            self.width, self.height = initial_config["size"]
 
         self.root = tk.Tk()
         self.root.title(self.translate("window_title"))
@@ -127,7 +134,13 @@ class MazeGame:
         self.step_count = 0
         self.update_step_label()
 
-        self.maze = Maze(self.width, self.height, algorithm=self.algorithm_var.get())
+        self.maze = Maze(
+            self.width,
+            self.height,
+            algorithm=self.algorithm_var.get(),
+            braid_factor=initial_config.get("braid", 0.0),
+            dead_end_bias=initial_config.get("dead_end_bias", 0.0),
+        )
         self.player_pos = (0, 0)
         self.goal_pos = (self.width - 1, self.height - 1)
         self.player_item: int | None = None
@@ -157,6 +170,10 @@ class MazeGame:
 
     def translate(self, key: str, **kwargs: Any) -> str:
         return translate_text(self.lang, key, **kwargs)
+
+    def get_difficulty_config(self, choice: str | None = None) -> Dict[str, Any]:
+        key = choice or self.difficulty_var.get()
+        return DIFFICULTY_SETTINGS.get(key, DIFFICULTY_SETTINGS[DEFAULT_DIFFICULTY])
 
     def set_status(self, key: str, **kwargs: Any) -> None:
         self.current_status_key = (key, dict(kwargs))
@@ -212,7 +229,8 @@ class MazeGame:
         button = self.difficulty_buttons.get(selected)
         if button is not None:
             button.select()
-        new_width, new_height = DIFFICULTY_SETTINGS[selected]
+        config = self.get_difficulty_config(selected)
+        new_width, new_height = config["size"]
         if (self.width, self.height) == (new_width, new_height):
             return
         self.width, self.height = new_width, new_height
@@ -494,7 +512,14 @@ class MazeGame:
                 pass
             self.animation_after_id = None
         self.is_animating = False
-        self.maze = Maze(self.width, self.height, algorithm=self.algorithm_var.get())
+        config = self.get_difficulty_config()
+        self.maze = Maze(
+            self.width,
+            self.height,
+            algorithm=self.algorithm_var.get(),
+            braid_factor=config.get("braid", 0.0),
+            dead_end_bias=config.get("dead_end_bias", 0.0),
+        )
         self.player_pos = (0, 0)
         self.goal_pos = (self.width - 1, self.height - 1)
         self.step_count = 0

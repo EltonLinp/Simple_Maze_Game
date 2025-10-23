@@ -29,7 +29,14 @@ class Cell:
 class Maze:
     SUPPORTED_ALGORITHMS = ("dfs", "prim", "kruskal")
 
-    def __init__(self, width: int, height: int, algorithm: str = "dfs") -> None:
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        algorithm: str = "dfs",
+        braid_factor: float = 0.0,
+        dead_end_bias: float = 0.0,
+    ) -> None:
         if width < 2 or height < 2:
             raise ValueError("Maze dimensions must be at least 2x2.")
         self.width = width
@@ -37,10 +44,50 @@ class Maze:
         if algorithm not in self.SUPPORTED_ALGORITHMS:
             algorithm = "dfs"
         self.algorithm = algorithm
-        self.grid: List[List[Cell]] = [
-            [Cell(x, y) for x in range(width)] for y in range(height)
-        ]
-        self._generate()
+        self.braid_factor = min(max(braid_factor, 0.0), 1.0)
+        self.dead_end_bias = min(max(dead_end_bias, -1.0), 1.0)
+        self.grid: List[List[Cell]] = []
+        self.dead_end_ratio: float = 0.0
+        self._build_maze()
+
+    def _build_maze(self) -> None:
+        attempts = 1
+        if self.dead_end_bias > 0:
+            attempts = min(10, 3 + int(self.dead_end_bias * 10))
+        elif self.dead_end_bias < 0:
+            attempts = min(10, 3 + int(-self.dead_end_bias * 10))
+
+        best_grid: List[List[Cell]] | None = None
+        best_ratio: float | None = None
+
+        for _ in range(attempts):
+            self.grid = [
+                [Cell(x, y) for x in range(self.width)] for y in range(self.height)
+            ]
+            self._generate()
+            ratio = self._dead_end_ratio(self.grid)
+            if self.dead_end_bias > 0:
+                if best_ratio is None or ratio > best_ratio:
+                    best_grid = self._clone_grid(self.grid)
+                    best_ratio = ratio
+            elif self.dead_end_bias < 0:
+                if best_ratio is None or ratio < best_ratio:
+                    best_grid = self._clone_grid(self.grid)
+                    best_ratio = ratio
+            else:
+                best_grid = self._clone_grid(self.grid)
+                best_ratio = ratio
+                break
+
+        if best_grid is None:
+            best_grid = self._clone_grid(self.grid)
+            best_ratio = self._dead_end_ratio(best_grid)
+
+        self.grid = best_grid
+        if self.braid_factor > 0:
+            self._apply_braid(self.grid, self.braid_factor)
+            best_ratio = self._dead_end_ratio(self.grid)
+        self.dead_end_ratio = best_ratio
 
     def _generate(self) -> None:
         generators = {
@@ -150,6 +197,48 @@ class Maze:
                 next_cell = self.grid[ny][nx]
                 current_cell.walls[direction] = False
                 next_cell.walls[OPPOSITE[direction]] = False
+
+    def _clone_grid(self, grid: List[List[Cell]]) -> List[List[Cell]]:
+        return [
+            [Cell(cell.x, cell.y, dict(cell.walls)) for cell in row]
+            for row in grid
+        ]
+
+    def _dead_end_ratio(self, grid: List[List[Cell]]) -> float:
+        dead_ends = 0
+        for row in grid:
+            for cell in row:
+                openings = sum(1 for wall_open in cell.walls.values() if not wall_open)
+                if openings == 1:
+                    dead_ends += 1
+        return dead_ends / float(self.width * self.height)
+
+    def _apply_braid(self, grid: List[List[Cell]], braid_factor: float) -> None:
+        cells: List[Tuple[int, int]] = []
+        for y, row in enumerate(grid):
+            for x, cell in enumerate(row):
+                openings = sum(1 for wall_open in cell.walls.values() if not wall_open)
+                if openings == 1:
+                    cells.append((x, y))
+        random.shuffle(cells)
+        for x, y in cells:
+            if random.random() > braid_factor:
+                continue
+            cell = grid[y][x]
+            candidates: List[Tuple[str, Cell]] = []
+            for direction, (dx, dy) in DIRECTIONS.items():
+                if not cell.walls[direction]:
+                    continue
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < self.width and 0 <= ny < self.height:
+                    neighbor = grid[ny][nx]
+                    if neighbor.walls[OPPOSITE[direction]]:
+                        candidates.append((direction, neighbor))
+            if not candidates:
+                continue
+            direction, neighbor = random.choice(candidates)
+            cell.walls[direction] = False
+            neighbor.walls[OPPOSITE[direction]] = False
 
     def has_wall(self, x: int, y: int, direction: str) -> bool:
         return self.grid[y][x].walls[direction]

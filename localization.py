@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 
 LANG_STRINGS: Dict[str, Dict[str, str]] = {
@@ -81,10 +81,10 @@ LANG_STRINGS: Dict[str, Dict[str, str]] = {
 }
 
 DEFAULT_DIFFICULTY = "medium"
-DIFFICULTY_SETTINGS: Dict[str, Tuple[int, int]] = {
-    "easy": (10, 10),
-    "medium": (15, 15),
-    "hard": (20, 20),
+DIFFICULTY_SETTINGS: Dict[str, Dict[str, Any]] = {
+    "easy": {"size": (10, 10), "braid": 0.65, "dead_end_bias": -0.5},
+    "medium": {"size": (15, 15), "braid": 0.15, "dead_end_bias": 0.2},
+    "hard": {"size": (20, 20), "braid": 0.0, "dead_end_bias": 0.8},
 }
 
 
