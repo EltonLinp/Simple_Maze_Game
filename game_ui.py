@@ -56,6 +56,10 @@ class MazeGame:
             buttons, text=self.translate("toggle_path_show"), command=self.toggle_path
         )
         self.toggle_path_btn.pack(side=tk.LEFT, padx=4)
+        self.hint_btn = tk.Button(
+            buttons, text=self.translate("btn_hint"), command=self.request_hint
+        )
+        self.hint_btn.pack(side=tk.LEFT, padx=4)
         self.reset_btn = tk.Button(
             buttons, text=self.translate("btn_reset"), command=self.reset_game
         )
@@ -70,6 +74,26 @@ class MazeGame:
             command=self.toggle_language,
         )
         self.toggle_lang_btn.pack(side=tk.LEFT, padx=4)
+
+        self.algorithm_var = tk.StringVar(value="dfs")
+        algorithm_frame = tk.Frame(self.root)
+        algorithm_frame.pack(pady=(0, 12))
+        self.algorithm_label = tk.Label(
+            algorithm_frame, text=self.translate("algorithm_label")
+        )
+        self.algorithm_label.pack(side=tk.LEFT, padx=(0, 8))
+        self.algorithm_buttons: Dict[str, tk.Radiobutton] = {}
+        for key in Maze.SUPPORTED_ALGORITHMS:
+            button = tk.Radiobutton(
+                algorithm_frame,
+                text=self.translate(f"algorithm_{key}"),
+                value=key,
+                variable=self.algorithm_var,
+                command=lambda choice=key: self.change_algorithm(choice),
+            )
+            button.pack(side=tk.LEFT, padx=4)
+            self.algorithm_buttons[key] = button
+        self.algorithm_buttons[self.algorithm_var.get()].select()
 
         difficulty_frame = tk.Frame(self.root)
         difficulty_frame.pack(pady=(0, 12))
@@ -103,16 +127,21 @@ class MazeGame:
         self.step_count = 0
         self.update_step_label()
 
-        self.maze = Maze(self.width, self.height)
+        self.maze = Maze(self.width, self.height, algorithm=self.algorithm_var.get())
         self.player_pos = (0, 0)
         self.goal_pos = (self.width - 1, self.height - 1)
         self.player_item: int | None = None
         self.goal_item: int | None = None
         self.path_item: int | None = None
+        self.hint_item: int | None = None
+        self.hint_path: List[Tuple[int, int]] = []
+        self.hint_index = 0
         self.show_path = False
+        self.is_animating = False
+        self.animation_after_id: str | None = None
 
         self.draw_maze()
-        self.place_player()
+        self.place_player(force=True)
         self.place_goal()
         self.update_path_display()
 
@@ -142,8 +171,12 @@ class MazeGame:
         self.toggle_path_btn.config(text=self.translate(toggle_key))
         lang_key = "switch_to_chinese" if self.lang == "en" else "switch_to_english"
         self.toggle_lang_btn.config(text=self.translate(lang_key))
+        self.hint_btn.config(text=self.translate("btn_hint"))
         self.reset_btn.config(text=self.translate("btn_reset"))
         self.quit_btn.config(text=self.translate("btn_quit"))
+        self.algorithm_label.config(text=self.translate("algorithm_label"))
+        for key, button in self.algorithm_buttons.items():
+            button.config(text=self.translate(f"algorithm_{key}"))
         self.difficulty_label.config(text=self.translate("difficulty_label"))
         for key, button in self.difficulty_buttons.items():
             button.config(text=self.translate(f"difficulty_{key}"))
@@ -160,6 +193,16 @@ class MazeGame:
         canvas_height = self.padding * 2 + self.height * self.cell_size
         self.canvas.config(width=canvas_width, height=canvas_height)
         self.root.geometry("")
+
+    def change_algorithm(self, choice: str | None = None) -> None:
+        selected = choice or self.algorithm_var.get()
+        if selected not in Maze.SUPPORTED_ALGORITHMS:
+            return
+        self.algorithm_var.set(selected)
+        button = self.algorithm_buttons.get(selected)
+        if button is not None:
+            button.select()
+        self.reset_game()
 
     def change_difficulty(self, choice: str | None = None) -> None:
         selected = choice or self.difficulty_var.get()
@@ -193,17 +236,27 @@ class MazeGame:
                 if cell.walls["W"]:
                     self.canvas.create_line(x1, y1, x1, y2, fill="#444", width=2, tags="maze")
 
-    def place_player(self) -> None:
-        if self.player_item is not None:
-            self.canvas.delete(self.player_item)
+    def place_player(self, force: bool = False) -> None:
         x, y = self.player_pos
         x1 = self.padding + x * self.cell_size + 6
         y1 = self.padding + y * self.cell_size + 6
         x2 = x1 + self.cell_size - 12
         y2 = y1 + self.cell_size - 12
-        self.player_item = self.canvas.create_oval(
-            x1, y1, x2, y2, fill="#2979ff", outline="#15426a", width=2, tags="player"
-        )
+        if self.player_item is None or force:
+            if self.player_item is not None:
+                self.canvas.delete(self.player_item)
+            self.player_item = self.canvas.create_oval(
+                x1,
+                y1,
+                x2,
+                y2,
+                fill="#2979ff",
+                outline="#15426a",
+                width=2,
+                tags="player",
+            )
+        else:
+            self.canvas.coords(self.player_item, x1, y1, x2, y2)
 
     def place_goal(self) -> None:
         if self.goal_item is not None:
@@ -283,9 +336,137 @@ class MazeGame:
             joinstyle=tk.ROUND,
             tags="path",
         )
+        # If the full path is shown, clear any partial hint overlay.
+        if self.show_path:
+            self.clear_hint()
+
+    def clear_hint(self) -> None:
+        if self.hint_item is not None:
+            self.canvas.delete(self.hint_item)
+            self.hint_item = None
+        self.hint_path = []
+        self.hint_index = 0
+
+    def draw_hint_path(self, path: List[Tuple[int, int]]) -> None:
+        if self.hint_item is not None:
+            self.canvas.delete(self.hint_item)
+            self.hint_item = None
+
+        if len(path) < 2:
+            return
+
+        coords: List[float] = []
+        for x, y in path:
+            cx = self.padding + x * self.cell_size + self.cell_size / 2
+            cy = self.padding + y * self.cell_size + self.cell_size / 2
+            coords.extend([cx, cy])
+
+        self.hint_item = self.canvas.create_line(
+            *coords,
+            fill="#f39c12",
+            width=4,
+            capstyle=tk.ROUND,
+            joinstyle=tk.ROUND,
+            dash=(8, 6),
+            tags="hint",
+        )
+
+    def get_direction_text(
+        self, start: Tuple[int, int], end: Tuple[int, int]
+    ) -> str:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        for key, (dir_dx, dir_dy) in DIRECTIONS.items():
+            if dx == dir_dx and dy == dir_dy:
+                return self.translate(f"direction_{key.lower()}")
+        return ""
+
+    def request_hint(self) -> None:
+        if self.is_animating:
+            return
+        if self.player_pos == self.goal_pos:
+            self.set_status("status_hint_goal")
+            self.clear_hint()
+            return
+
+        path = self.compute_shortest_path(self.player_pos, self.goal_pos)
+        if len(path) < 2:
+            self.set_status("status_hint_none")
+            self.clear_hint()
+            return
+
+        if path != self.hint_path:
+            self.hint_path = path
+            self.hint_index = 0
+            if self.hint_item is not None:
+                self.canvas.delete(self.hint_item)
+                self.hint_item = None
+
+        if self.hint_index >= len(self.hint_path) - 1:
+            self.set_status("status_hint_complete")
+            return
+
+        self.hint_index += 1
+        partial_path = self.hint_path[: self.hint_index + 1]
+        self.draw_hint_path(partial_path)
+        direction_text = self.get_direction_text(
+            partial_path[-2], partial_path[-1]
+        )
+        self.set_status("status_hint_step", direction=direction_text)
+
+    def animate_player_move(
+        self, start: Tuple[int, int], end: Tuple[int, int]
+    ) -> None:
+        if self.player_item is None:
+            self.place_player(force=True)
+        start_coords = self.canvas.coords(self.player_item) or [
+            self.padding + start[0] * self.cell_size + 6,
+            self.padding + start[1] * self.cell_size + 6,
+            self.padding + start[0] * self.cell_size + self.cell_size - 6,
+            self.padding + start[1] * self.cell_size + self.cell_size - 6,
+        ]
+        end_x1 = self.padding + end[0] * self.cell_size + 6
+        end_y1 = self.padding + end[1] * self.cell_size + 6
+        end_x2 = end_x1 + self.cell_size - 12
+        end_y2 = end_y1 + self.cell_size - 12
+
+        steps = max(6, self.cell_size // 4)
+        dx = (end_x1 - start_coords[0]) / steps
+        dy = (end_y1 - start_coords[1]) / steps
+
+        if self.animation_after_id is not None:
+            try:
+                self.root.after_cancel(self.animation_after_id)
+            except tk.TclError:
+                pass
+            self.animation_after_id = None
+
+        self.is_animating = True
+
+        def step(count: int = 0) -> None:
+            if count >= steps:
+                self.canvas.coords(self.player_item, end_x1, end_y1, end_x2, end_y2)
+                self.is_animating = False
+                self.animation_after_id = None
+                self.after_move_animation()
+                return
+            self.canvas.move(self.player_item, dx, dy)
+            self.animation_after_id = self.root.after(16, lambda: step(count + 1))
+
+        step()
+
+    def after_move_animation(self) -> None:
+        self.update_path_display()
+        if self.player_pos == self.goal_pos:
+            self.set_status("status_win")
+            messagebox.showinfo(
+                self.translate("win_title"), self.translate("win_message")
+            )
+        else:
+            self.set_status("status_move")
 
     def handle_move(self, direction: str) -> None:
-        if self.player_pos == self.goal_pos:
+        if self.player_pos == self.goal_pos or self.is_animating:
             return
 
         x, y = self.player_pos
@@ -301,26 +482,27 @@ class MazeGame:
         self.player_pos = (nx, ny)
         self.step_count += 1
         self.update_step_label()
-        self.place_player()
-        self.set_status("status_move")
-        self.update_path_display()
-
-        if self.player_pos == self.goal_pos:
-            self.set_status("status_win")
-            messagebox.showinfo(
-                self.translate("win_title"), self.translate("win_message")
-            )
+        self.clear_hint()
+        self.animate_player_move((x, y), self.player_pos)
 
     def reset_game(self) -> None:
         self.update_canvas_size()
-        self.maze = Maze(self.width, self.height)
+        if self.animation_after_id is not None:
+            try:
+                self.root.after_cancel(self.animation_after_id)
+            except tk.TclError:
+                pass
+            self.animation_after_id = None
+        self.is_animating = False
+        self.maze = Maze(self.width, self.height, algorithm=self.algorithm_var.get())
         self.player_pos = (0, 0)
         self.goal_pos = (self.width - 1, self.height - 1)
         self.step_count = 0
         self.update_step_label()
+        self.clear_hint()
         self.draw_maze()
         self.place_goal()
-        self.place_player()
+        self.place_player(force=True)
         self.set_status("status_new_maze")
         self.update_path_display()
 
